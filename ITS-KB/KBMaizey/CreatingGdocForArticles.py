@@ -95,7 +95,7 @@ def update_google_doc(doc_id, content):
         
         return True
     except HttpError as error:
-        print(f"An error occurred while updating Google Doc: {error}")
+        print(f"An error occurred while updating Google Doc:{doc_id} {error}")
         return False
 
 def load_tracking_dict_from_spreadsheet(spreadsheet_title, folder_id=None):
@@ -217,72 +217,72 @@ def document_exists(doc_id, folder_id):
 
 
 
-def create_docs_for_rows(folder_id, results, tracking_dict, spreadsheet_title, spreadsheet_folder_id):
-    # Extract the current article IDs from the results
-    current_article_ids = set(str(row[0]) for row in results)
+def create_docs_for_rows(
+    folder_id,
+    results,               # list of rows from Denodo
+    tracking_dict,         # loaded from sheet
+    spreadsheet_title,     # e.g. "Public Tracking"
+    spreadsheet_folder_id  # same as folder_id for the sheet
+):
+    # 1) Figure out which IDs we no longer have — delete their docs & drop them.
+    current_ids = {str(row[0]) for row in results}
+    to_delete = set(tracking_dict) - current_ids
+    for aid in to_delete:
+        delete_google_doc(tracking_dict[aid]['doc_id'])
+        del tracking_dict[aid]
 
-    # Identify articles that are in the tracking_dict but not in current results
-    articles_to_delete = set(tracking_dict.keys()) - current_article_ids
+    # 2) Build a tiny list of rows that actually need action.
+    rows_to_process = []
+    for row in results:
+        aid, title, body, summary, rev, _url = row
+        aid_str = str(aid)
 
-    # Delete documents and remove entries from tracking_dict for deleted articles
-    for article_id in articles_to_delete:
-        doc_id = tracking_dict[article_id]['doc_id']
-        delete_status = delete_google_doc(doc_id)
-        if delete_status:
-            print(f"Deleted document for Article ID: {article_id}")
+        needs = False
+        # brand‐new article?
+        if aid_str not in tracking_dict:
+            needs = True
         else:
-            print(f"Failed to delete document for Article ID: {article_id}")
-        # Remove the article from the tracking dictionary
-        del tracking_dict[article_id]
-    for i, row in enumerate(results):
-        article_id, title, body, summary, revision_number, url = row
+            entry = tracking_dict[aid_str]
+            # revision bumped?
+            if str(entry['revision_number']) != str(rev):
+                needs = True
+            # or the doc has been moved/trashed?
+            elif not document_exists(entry['doc_id'], folder_id):
+                needs = True
 
-        content = f"{url}\n\n"
-        content += f"Title: {title}\n\n"
-        content += f"Body:\n{body}\n\n"
-        content += f"Summary:\n{summary}"
-        doc_title = str(article_id)
+        if needs:
+            rows_to_process.append(row)
 
-        if str(article_id) in tracking_dict:
-            doc_id = tracking_dict[str(article_id)]['doc_id']
-            # Check if the document exists in the specified folder
-            if not document_exists(doc_id, folder_id):
-                print(f"Document with ID {doc_id} is not in the folder {folder_id}. Recreating the document.")
-                del tracking_dict[str(article_id)]
-                # Proceed to create a new document
-                doc_id = create_google_doc(folder_id, doc_title, content)
-                if doc_id:
-                    tracking_dict[str(article_id)] = {'doc_id': doc_id, 'revision_number': revision_number}
-                    save_tracking_dict_to_spreadsheet(spreadsheet_title, tracking_dict, spreadsheet_folder_id)  # Save the updated tracking dict
-                    print(f"Successfully created document for Article ID: {article_id}")
-                else:
-                    print(f"Failed to create document for Article ID: {article_id}")
-                continue  # Move on to the next article
-            else:
-                # Document exists in the folder, check revision number
-                if tracking_dict[str(article_id)]['revision_number'] == revision_number:
-                    # No update needed
-                    print(f"Document for Article ID {article_id} is up to date.")
-                    continue
-                else:
-                    # Need to update the document
-                    update_status = update_google_doc(doc_id, content)
-                    if update_status:
-                        tracking_dict[str(article_id)]['revision_number'] = revision_number
-                        save_tracking_dict_to_spreadsheet(spreadsheet_title, tracking_dict,spreadsheet_folder_id)  # Save the updated tracking dict
-                        print(f"Updated document for Article ID: {article_id}")
-                    else:
-                        print(f"Failed to update document for Article ID: {article_id}")
+    # 3) Process only those rows
+    for aid, title, body, summary, rev, url in rows_to_process:
+        aid_str = str(aid)
+        content = f"{url}\n\nTitle: {title}\n\nBody:\n{body}\n\nSummary:\n{summary}"
+        doc_id = tracking_dict.get(aid_str, {}).get('doc_id')
+
+        # If it exists but isn’t in the right folder -> recreate
+        if doc_id and not document_exists(doc_id, folder_id):
+            doc_id = create_google_doc(folder_id, aid_str, content)
+
+        # If new -> create; if existing & revision changed -> update
+        if not doc_id:
+            doc_id = create_google_doc(folder_id, aid_str, content)
         else:
-            # Need to create new document
-            doc_id = create_google_doc(folder_id, doc_title, content)
-            if doc_id:
-                # Save to tracking dict
-                tracking_dict[str(article_id)] = {'doc_id': doc_id, 'revision_number': revision_number}
-                save_tracking_dict_to_spreadsheet(spreadsheet_title, tracking_dict, spreadsheet_folder_id)  # Save the updated tracking dict
-                print(f"Successfully created document for Article ID: {article_id}")
-            else:
-                print(f"Failed to create document for Article ID: {article_id}")
+            update_google_doc(doc_id, content)
+
+        # Refresh our in‐memory tracking entry
+        if doc_id:
+            tracking_dict[aid_str] = {
+                'doc_id': doc_id,
+                'revision_number': rev
+            }
+
+    # 4) Finally, save the updated tracking_dict back to the spreadsheet once
+    save_tracking_dict_to_spreadsheet(
+        spreadsheet_title,
+        tracking_dict,
+        spreadsheet_folder_id
+    )
+
 
 def delete_google_doc(doc_id):
     try:
@@ -335,22 +335,21 @@ def print_results(results):
 
 
 def main():
-    # Set the folder ID where the spreadsheets are located
-    spreadsheet_folder_id = '0ADjQe-gJ6HwnUk9PVA'
+    spreadsheet_folder_id = '0AIl6WpKmR6tsUk9PVA'
     spreadsheet_title_public = "Public Tracking"
     spreadsheet_title_um_login = "UM-Login Tracking"
     spreadsheet_title_support_staff = "Support Staff Tracking"
 
     # Load tracking dictionaries from Google Spreadsheets
-    tracking_dict_for_public = load_tracking_dict_from_spreadsheet("Public Tracking", spreadsheet_folder_id)
+    #tracking_dict_for_public = load_tracking_dict_from_spreadsheet("Public Tracking", spreadsheet_folder_id)
     tracking_dict_for_um_login = load_tracking_dict_from_spreadsheet("UM-Login Tracking", spreadsheet_folder_id)
-    tracking_dict_for_support_staff = load_tracking_dict_from_spreadsheet("Support Staff Tracking", spreadsheet_folder_id)
+    #tracking_dict_for_support_staff = load_tracking_dict_from_spreadsheet("Support Staff Tracking", spreadsheet_folder_id)
 
     # Set the folder ID where the documents will be created in Google Drive
 
-    folder_id_public = "10EeZLQcNr9QIpH-IxcV9J_I8VKv-eiG9"  # Replace with your actual folder ID
-    folder_id_um_login = "1QSxzyZEiybMIA7sATs7Mh03T6iQ3nQ-9"  # Replace with your actual folder ID
-    folder_id_support_staff = "1XPj8BzKWm5IKxeaizH5lOfTwAYNT5Bpt" 
+    #folder_id_public = "10EeZLQcNr9QIpH-IxcV9J_I8VKv-eiG9"  # Replace with your actual folder ID
+    folder_id_um_login = "1dFJYWD-fQi5NBekIwVtqlKlYUQQMRKOm"  # Replace with your actual folder ID
+    #folder_id_support_staff = "1XPj8BzKWm5IKxeaizH5lOfTwAYNT5Bpt" 
     
     query_public = """
     SELECT articleid, articlesubject, articlebody, articlesummary, revisionnumber
@@ -360,7 +359,7 @@ def main():
     query_um_login = """
     SELECT articleid, articlesubject, articlebody, articlesummary, revisionnumber
     FROM dw_tdx.knowledgebasearticlesreportview 
-    WHERE articlestatusid = 3 AND ispublic = 0 AND clientappid = 30 AND categorypathnames = 'U-M Login' ORDER BY articleid;
+    WHERE articlestatusid = 3 AND ispublic = 0 AND clientappid = 30 AND categorypathnames = 'U-M Login' ORDER BY articleid limit 10;
     """
     query_support_staff = """
     SELECT articleid, articlesubject, articlebody, articlesummary, revisionnumber
@@ -377,25 +376,25 @@ def main():
     denodoserver_database = "gateway"
 
     # Fetch data from the Denodo database
-    results_public = denodo_database(denododriver_path, credential_user_id, credential_password, 
-                             denodoserver_name, denodoserver_jdbc_port, denodoserver_database, query_public)
+    #results_public = denodo_database(denododriver_path, credential_user_id, credential_password, 
+    #                         denodoserver_name, denodoserver_jdbc_port, denodoserver_database, query_public)
     results_um_login = denodo_database(denododriver_path, credential_user_id, credential_password,
                                denodoserver_name, denodoserver_jdbc_port, denodoserver_database, query_um_login)
-    results_support_staff = denodo_database(denododriver_path, credential_user_id, credential_password,
-                                denodoserver_name, denodoserver_jdbc_port, denodoserver_database, query_support_staff)
+    #results_support_staff = denodo_database(denododriver_path, credential_user_id, credential_password,
+    #                            denodoserver_name, denodoserver_jdbc_port, denodoserver_database, query_support_staff)
     
-    #Convert the results to a DataFrame
-    df_results_public = creating_dataframe(results_public)
+    # Convert the results to a DataFrame
+    #df_results_public = creating_dataframe(results_public)
     #print_results(df_results_public)
     df_results_um_login = creating_dataframe(results_um_login)
-    #print_results(df_results_um_login)
-    df_results_support_staff = creating_dataframe(results_support_staff)
-    #print_results(df_results_support_staff)
+    print_results(df_results_um_login)
+    #df_results_support_staff = creating_dataframe(results_support_staff)
+    ##print_results(df_results_support_staff)
 
     # Create documents and update tracking dictionaries
-    create_docs_for_rows(folder_id_public, df_results_public.values.tolist(), tracking_dict_for_public, spreadsheet_title_public,spreadsheet_folder_id )
+    #create_docs_for_rows(folder_id_public, df_results_public.values.tolist(), tracking_dict_for_public, spreadsheet_title_public,spreadsheet_folder_id )
     create_docs_for_rows(folder_id_um_login, df_results_um_login.values.tolist(), tracking_dict_for_um_login, spreadsheet_title_um_login,spreadsheet_folder_id)
-    create_docs_for_rows(folder_id_support_staff, df_results_support_staff.values.tolist(), tracking_dict_for_support_staff, spreadsheet_title_support_staff,spreadsheet_folder_id)
+   # create_docs_for_rows(folder_id_support_staff, df_results_support_staff.values.tolist(), tracking_dict_for_support_staff, spreadsheet_title_support_staff,spreadsheet_folder_id)
     
 
 if __name__ == "__main__":
