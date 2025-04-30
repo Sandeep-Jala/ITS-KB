@@ -64,20 +64,52 @@ def create_google_doc(folder_id, title, content):
         print(f"An error occurred while creating Google Doc: {error}")
         return None
 
-def update_google_doc(doc_id, content):
-    try:
-        creds = authenticate()
-        doc_service = build('docs', 'v1', credentials=creds)
-        
-        doc = doc_service.documents().get(documentId=doc_id).execute()
-        end_index = doc.get('body').get('content')[-1].get('endIndex')
+def update_google_doc(doc_id, content,
+                      marker="Example Requests and Incidents that were resolved using the above article"):
+    """
+    If marker found: only replace up to it (ticket data untouched).
+    If not: do a full‐document overwrite, all in one function—no recursion.
+    """
+    creds       = authenticate()
+    doc_service = build('docs', 'v1', credentials=creds)
+
+    # 1) fetch & scan for marker
+    doc   = doc_service.documents().get(documentId=doc_id).execute()
+    elems = doc.get('body', {}).get('content', [])
+    marker_index = None
+
+    for elem in elems:
+        if 'paragraph' not in elem:
+            continue
+        text = "".join(pe.get('textRun', {}).get('content', "")
+                       for pe in elem['paragraph']['elements'])
+        if marker.lower() in text.lower():
+            marker_index = elem.get('startIndex')
+            break
+
+    # 2) build delete/insert requests
+    if marker_index is not None:
+        # partial replace up to the marker
         requests = [
             {
                 'deleteContentRange': {
-                    'range': {
-                        'startIndex': 1,
-                        'endIndex': end_index - 1
-                    }
+                    'range': {'startIndex': 1, 'endIndex': marker_index}
+                }
+            },
+            {
+                'insertText': {
+                    'location': {'index': 1},
+                    'text': content + "\n"
+                }
+            }
+        ]
+    else:
+        # full-doc replace: delete everything except final newline, then insert
+        end_index = elems[-1].get('endIndex', 1)
+        requests = [
+            {
+                'deleteContentRange': {
+                    'range': {'startIndex': 1, 'endIndex': end_index - 1}
                 }
             },
             {
@@ -87,16 +119,18 @@ def update_google_doc(doc_id, content):
                 }
             }
         ]
-        
+
+    # 3) send batchUpdate
+    try:
         doc_service.documents().batchUpdate(
             documentId=doc_id,
             body={'requests': requests}
         ).execute()
-        
         return True
     except HttpError as error:
-        print(f"An error occurred while updating Google Doc:{doc_id} {error}")
+        print(f"Error updating doc {doc_id}: {error}")
         return False
+
 
 def load_tracking_dict_from_spreadsheet(spreadsheet_title, folder_id=None):
     try:
@@ -341,15 +375,15 @@ def main():
     spreadsheet_title_support_staff = "Support Staff Tracking"
 
     # Load tracking dictionaries from Google Spreadsheets
-    #tracking_dict_for_public = load_tracking_dict_from_spreadsheet("Public Tracking", spreadsheet_folder_id)
+    tracking_dict_for_public = load_tracking_dict_from_spreadsheet("Public Tracking", spreadsheet_folder_id)
     tracking_dict_for_um_login = load_tracking_dict_from_spreadsheet("UM-Login Tracking", spreadsheet_folder_id)
-    #tracking_dict_for_support_staff = load_tracking_dict_from_spreadsheet("Support Staff Tracking", spreadsheet_folder_id)
+    tracking_dict_for_support_staff = load_tracking_dict_from_spreadsheet("Support Staff Tracking", spreadsheet_folder_id)
 
     # Set the folder ID where the documents will be created in Google Drive
 
-    #folder_id_public = "10EeZLQcNr9QIpH-IxcV9J_I8VKv-eiG9"  # Replace with your actual folder ID
+    folder_id_public = "10EeZLQcNr9QIpH-IxcV9J_I8VKv-eiG9"  # Replace with your actual folder ID
     folder_id_um_login = "1dFJYWD-fQi5NBekIwVtqlKlYUQQMRKOm"  # Replace with your actual folder ID
-    #folder_id_support_staff = "1XPj8BzKWm5IKxeaizH5lOfTwAYNT5Bpt" 
+    folder_id_support_staff = "1XPj8BzKWm5IKxeaizH5lOfTwAYNT5Bpt" 
     
     query_public = """
     SELECT articleid, articlesubject, articlebody, articlesummary, revisionnumber
@@ -376,25 +410,25 @@ def main():
     denodoserver_database = "gateway"
 
     # Fetch data from the Denodo database
-    #results_public = denodo_database(denododriver_path, credential_user_id, credential_password, 
-    #                         denodoserver_name, denodoserver_jdbc_port, denodoserver_database, query_public)
+    results_public = denodo_database(denododriver_path, credential_user_id, credential_password, 
+                             denodoserver_name, denodoserver_jdbc_port, denodoserver_database, query_public)
     results_um_login = denodo_database(denododriver_path, credential_user_id, credential_password,
                                denodoserver_name, denodoserver_jdbc_port, denodoserver_database, query_um_login)
-    #results_support_staff = denodo_database(denododriver_path, credential_user_id, credential_password,
-    #                            denodoserver_name, denodoserver_jdbc_port, denodoserver_database, query_support_staff)
+    results_support_staff = denodo_database(denododriver_path, credential_user_id, credential_password,
+                                denodoserver_name, denodoserver_jdbc_port, denodoserver_database, query_support_staff)
     
     # Convert the results to a DataFrame
-    #df_results_public = creating_dataframe(results_public)
-    #print_results(df_results_public)
+    df_results_public = creating_dataframe(results_public)
+    print_results(df_results_public)
     df_results_um_login = creating_dataframe(results_um_login)
     print_results(df_results_um_login)
-    #df_results_support_staff = creating_dataframe(results_support_staff)
-    ##print_results(df_results_support_staff)
+    df_results_support_staff = creating_dataframe(results_support_staff)
+    print_results(df_results_support_staff)
 
     # Create documents and update tracking dictionaries
-    #create_docs_for_rows(folder_id_public, df_results_public.values.tolist(), tracking_dict_for_public, spreadsheet_title_public,spreadsheet_folder_id )
+    create_docs_for_rows(folder_id_public, df_results_public.values.tolist(), tracking_dict_for_public, spreadsheet_title_public,spreadsheet_folder_id )
     create_docs_for_rows(folder_id_um_login, df_results_um_login.values.tolist(), tracking_dict_for_um_login, spreadsheet_title_um_login,spreadsheet_folder_id)
-   # create_docs_for_rows(folder_id_support_staff, df_results_support_staff.values.tolist(), tracking_dict_for_support_staff, spreadsheet_title_support_staff,spreadsheet_folder_id)
+    create_docs_for_rows(folder_id_support_staff, df_results_support_staff.values.tolist(), tracking_dict_for_support_staff, spreadsheet_title_support_staff,spreadsheet_folder_id)
     
 
 if __name__ == "__main__":
